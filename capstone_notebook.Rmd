@@ -1,0 +1,293 @@
+---
+title: "Capstone Notebook"
+output: html_notebook
+author: "Chenchao Zang"
+---
+#### Load packages required for analysis
+```{r, include=FALSE}
+library(minfi)
+library(GEOquery)
+library(limma)
+library(minfi)
+library(RColorBrewer)
+library(matrixStats)
+library(stringr)
+require(Biobase)
+library(rafalib)
+library(ggplot2)
+source("https://bioconductor.org/biocLite.R")
+biocLite("minfi")
+biocLite("bumphunter")
+biocLite("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+biocLite("IlluminaHumanMethylation450kmanifest")
+biocLite("missMethyl")
+biocLite("Gviz")
+biocLite('DMRcate')
+library(minfi)
+library(bumphunter)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(IlluminaHumanMethylation450kmanifest)
+library(missMethyl)
+library(Gviz)
+library(DMRcate)
+```
+#### Get the dataset 
+```{r}
+gse <- getGEO("GSE90124",GSEMatrix=FALSE)
+```
+#### Get the 450K gene annotation
+```{r}
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+```
+#### Create the Beta Value Matrix
+```{r}
+gsmlist = Filter(function(gsm) {Meta(gsm)$platform=='GPL13534'},GSMList(gse))
+length(gsmlist)
+
+# Look at the first few rows of a single gsm
+Table(gsmlist[[1]])[1:5,]
+
+# and get the column descriptions
+Columns(gsmlist[[1]])[1:5,]
+
+GSMList(gse)[[1]]@header$characteristics_ch1
+
+# get the probeset ordering
+probesets <- GPLList(gse)$GPL13534@dataTable@table$ID
+
+
+# Create the data matrix. Row is the probes and columns are samples
+data.matrix <- do.call('cbind',lapply(gsmlist,function(x) 
+          {tab <- Table(x)
+          mymatch <- match(probesets,tab$ID_REF)
+          return(tab$VALUE[mymatch])
+          }))
+rownames(data.matrix) <- probesets
+colnames(data.matrix) <- names(gsmlist)
+newmatrix <- na.omit(data.matrix)
+```
+#### Get the smoking, BMI and age
+```{r}
+bmi_status=c()
+smoking_status=c()
+age=c()
+for (i in 1:dim(newmatrix)[2]){
+  bmi_status[i]=(as.numeric(gsub("[^0-9/.]","",GSMList(gse)[[i]]@header$characteristics_ch1[9])))
+  smoking_status[i]=(as.numeric(gsub("[^0-9/.]","",GSMList(gse)[[i]]@header$characteristics_ch1[10])))
+  age[i]=(as.numeric(gsub("[^0-9/.]","",GSMList(gse)[[i]]@header$characteristics_ch1[3])))
+}
+```
+## Data Exploration
+
+#### Draw the age histogram
+```{r}
+ggplot() +
+  geom_histogram(aes(x=age),binwidth = 4,color="lightblue")+
+  xlab("Age")+
+  labs(title = "Distribution of Age","center")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+#### Draw the BMI histogram
+```{r}
+ggplot() +
+  geom_histogram(aes(x=bmi_status),binwidth = 4,color="lightblue")+
+  xlab("BMI Status")+
+  labs(title = "Distribution of BMI Status","center")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+#### Draw the Smoking histogram
+```{r}
+ggplot() +
+  geom_bar(aes(x=smoking_status),color="lightblue")+
+  xlab("Smoking Status")+
+  labs(title = "Distribution of Smoking Status","center")
+  theme(plot.title = element_text(hjust = 0.5))
+```
+#### Create the beta value box plot of each samples
+```{r}
+boxplot(newmatrix)
+```
+#### Create beta value density distribution
+```{r}
+densityPlot(newmatrix,main="Raw", legend=FALSE)
+```
+#### Make a GenomicRatioSet from a matrix.
+```{r, include=FALSE}
+grset <- makeGenomicRatioSetFromMatrix(newmatrix,rownames = rownames(newmatrix),what = 'Beta')
+```
+#### Get the genomic location of the CpGs
+```{r}
+gr <- granges(grset)
+```
+## Preliminary Data Analysis
+```{r, include=FALSE}
+design <- model.matrix( ~ 0+bmi_status + age + factor(smoking_status))
+colnames(design) <- c('bmi','age','smoking_status0','smoking_status1','smoking_status2')
+lmfitted <- lmFit(newmatrix, design = design)
+ebayesd <- eBayes(lmfitted)
+topped <- topTable(ebayesd, number = 6000)
+```
+#### Get the Table Information for the age related CpG sites and plot Top 4 CpG Sites
+```{r}
+ann450kSub <- ann450k[match(rownames(newmatrix),ann450k$Name),
+                      c(1:4,12:19,24:ncol(ann450k))]
+DMPs_age <- topTable(ebayesd, coef='age', genelist=ann450kSub)
+par(mfrow=c(2,2))
+sapply(rownames(DMPs_age)[1:4], function(cpg){
+  plotCpg(newmatrix, cpg=cpg, pheno=age, ylab = "Beta values", xlab = "Age",type = 'continuous')
+})
+mtext("Top 4 DMP Associated with Age", side = 3, line = -1, outer = TRUE)
+```
+#### Get the Table Information for the BMI related CpG sites and plot Top 4 CpG Sites
+```{r}
+DMPs_bmi <- topTable(ebayesd, coef='bmi', genelist=ann450kSub)
+par(mfrow=c(2,2))
+sapply(rownames(DMPs_bmi)[1:4], function(cpg){
+  plotCpg(newmatrix, cpg=cpg, pheno=bmi_status, xlab = 'BMI Status', ylab = "Beta values",measure = 'beta',type = 'continuous')
+})
+mtext("Top 4 DMP Associated with BMI status", side = 3, line = -1, outer = TRUE)
+```
+#### Get the Table Information for the Smoking related CpG sites and plot Top 4 CpG Sites
+```{r}
+design <- model.matrix( ~ 0+bmi_status + age + factor(smoking_status))
+colnames(design) <- c('bmi','age','smoking_status0','smoking_status1','smoking_status2')
+lmfitted <- lmFit(newmatrix, design = design)
+contMatrix <- makeContrasts(smoking_status0-smoking_status1,
+                           smoking_status0-smoking_status2,
+                           smoking_status1-smoking_status2,
+                           levels=design)
+fit2 <- contrasts.fit(lmfitted, contMatrix)
+fit2 <- eBayes(fit2)
+summary(decideTests(fit2))
+```
+#### Top 4 DMP Associated with smoking status group by smoking status 0 and 1
+```{r}
+DMPs_smoking_no_less <- topTable(fit2, coef=1, genelist=ann450kSub)
+par(mfrow=c(2,2))
+sapply(rownames(DMPs_smoking_no_less)[1:4], function(cpg){
+  plotCpg(newmatrix[,smoking_status==c(0,1)], cpg=cpg, pheno=smoking_status[smoking_status==c(0,1)], xlab = 'Smoking Status', ylab = "Beta values",measure = 'beta', type = 'categorical')
+})
+mtext("Top 4 DMP Associated with smoking status group by smoking status 0 and 1", side = 3, line = -1, outer = TRUE)
+```
+#### Top 4 DMP Associated with smoking status group by smoking status 0 and 2
+```{r}
+DMPs_smoking_no_severe <- topTable(fit2, coef=2, genelist=ann450kSub)
+par(mfrow=c(2,2))
+sapply(rownames(DMPs_smoking_no_severe)[1:4], function(cpg){
+  plotCpg(newmatrix[,smoking_status==c(0,2)], cpg=cpg, pheno=smoking_status[smoking_status==c(0,2)], xlab = 'Smoking Status', ylab = "Beta values",measure = 'beta', type = 'categorical')
+})
+mtext("Top 4 DMP Associated with smoking status group by smoking status 0 and 2", side = 3, line = -1, outer = TRUE)
+```
+#### Top 4 DMP Associated with smoking status group by smoking status 1 and 2
+```{r}
+DMPs_smoking_less_severe <- topTable(fit2, coef=3, genelist=ann450kSub)
+par(mfrow=c(2,2))
+sapply(rownames(DMPs_smoking_less_severe)[1:4], function(cpg){
+  plotCpg(newmatrix[,smoking_status==c(1,2)], cpg=cpg, pheno=smoking_status[smoking_status==c(1,2)], xlab = 'Smoking Status', ylab = "Beta values",measure = 'beta', type = 'categorical')
+})
+mtext("Top 4 DMP Associated with smoking status group by smoking status 1 and 2", side = 3, line = -1, outer = TRUE)
+```
+#### Differential methylation analysis of regions
+```{r}
+myAnnotation <- cpg.annotate(object = newmatrix, datatype = "array", what = "Beta", 
+                             analysis.type = "differential", design = design, 
+                             contrasts = TRUE, cont.matrix = contMatrix, 
+                             coef = "smoking_status0 - smoking_status1", arraytype = "450K")
+DMRs <- dmrcate(myAnnotation, lambda=1000, C=2)
+head(DMRs$results)
+```
+```{r}
+# convert the regions to annotated genomic ranges
+data(dmrcatedata)
+results.ranges <- extractRanges(DMRs, genome = "hg19")
+
+# set up the grouping variables and colours
+groups <- pal[1:length(unique(smoking_status))]
+names(groups) <- levels(factor(smoking_status))
+cols <- groups[as.character(factor(smoking_status))]
+samps <- sample(1:322,10)
+
+# draw the plot for the top DMR
+par(mfrow=c(1,1))
+DMR.plot(ranges=results.ranges, dmr=1, CpGs=newmatrix, phen.col=cols, what = "Beta",
+         arraytype = "450K", pch=16, toscale=TRUE, plotmedians=TRUE, 
+         genome="hg19", samps=samps)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### Smart Plot
+```{r}
+splot(lmfitted$coef[,2],-log10(ebayesd$p.value[,2]),xlab="Effect size",ylab="-log10 p-value")
+```
+#### Genomic Position
+```{r}
+library(GenomicRanges)
+i <- which.min(ebayesd$p.value[,2])
+middle <- gr[i,]
+Index<-gr%over%(middle+10000)
+chr=as.factor(seqnames(gr))
+pos=start(gr)
+
+plot(pos[Index],lmfitted$coef[Index,2],type="b",xlab="genomic location",ylab="difference")
+```
+
+#### test
+```{r}
+matplot(pos[Index],newmatrix[Index,],col=smoking_status,xlab="genomic location")
+```
+
+#### dsads
+```{r}
+myannotation <- cpg.annotate("array", grset, what="Beta",analysis.type="ANOVA", design=design, coef=4,fdr = 0.001)
+```
+
+```{r}
+DMRs <- dmrcate(myannotation, lambda=1000, C=2)
+head(DMRs$results)
+results.ranges <- extractRanges(DMRs, genome = "hg19")
+
+# set up the grouping variables and colours
+pal <- brewer.pal(8,"Dark2")
+groups <- pal[1:length(unique(smoking_status))]
+names(groups) <- levels(factor(smoking_status))
+cols <- groups[as.character(factor(smoking_status))]
+samps <- 1:20
+
+library(doParallel)
+registerDoParallel(cores = 10)
+
+
+par(mfrow=c(1,1))
+DMR.plot(ranges=results.ranges, dmr=1, CpGs=newmatrix[,1:20], phen.col=cols, what = "Beta",
+         arraytype = "450K", pch=16, toscale=TRUE, plotmedians=TRUE, 
+         genome="hg19", samps=samps)
+```
+
+```{r}
+library(doParallel)
+registerDoParallel(cores = 1)
+```
+
+
+
+```{r}
+chr=as.factor(seqnames(gr))
+pos=start(gr)
+cl=clusterMaker(chr,pos,maxGap=500)
+res<-bumphunter(newmatrix,design,pos=pos,cutoff=0.2,B=0)
+```
+
